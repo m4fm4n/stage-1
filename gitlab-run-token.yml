@@ -1,0 +1,2 @@
+#Здесь оставляем сгенерированный токен для gitlab-runner
+gitlab_run_token: "<gitlab-ruuner-token>"

@@ -1,0 +1,45 @@
+groups:
+- name: Test_APP monitoring
+  rules:
+  - alert: Test_APP - HttpFailure
+    expr: probe_http_status_code != 200
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: Test_APP HTTP failure (instance {{ $labels.instance }})
+      description: "HTTP status code is not 200\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+#
+  - alert: Test_APP - High Duration
+    expr: avg_over_time(probe_http_duration_seconds[1m]) > 5
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      summary: Slow HTTP (instance {{ $labels.instance }})
+      description: "Test_APP - High Duration\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+#
+- name: Recording_rules
+  interval: 5s
+  rules:
+  - record: node_exporter:node_filesystem_free:fs_used_percents
+    expr: 100 - 100 * ( node_filesystem_free{mountpoint="/"} / node_filesystem_size{mountpoint="/"} )
+
+- name: Alerting_rules
+  rules:
+  - alert: DiskSpace10%Free
+    expr: node_exporter:node_filesystem_free:fs_used_percents >= 90
+    labels:
+      severity: moderate
+    annotations:
+      summary: "Instance {{ $labels.instance }} is low on disk space"
+      description: "{{ $labels.instance }} has only {{ $value }}% free."
+#
+  - alert: Monitoring Server Restarted
+    expr: ceil(((node_time_seconds - node_boot_time_seconds) / 60)) < 5
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Monitoring server restarted (instance {{ $labels.instance }})"
+      description: "{{ $labels.instance }} requires a restarted.\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"

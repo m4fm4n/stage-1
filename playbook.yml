@@ -1,0 +1,186 @@
+---
+- name: "Gathering k8s config master-node"
+  hosts: master_node
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  gather_facts: no
+
+#На мастер ноде сохраняем конфиг во временную переменную
+  tasks:
+  - shell:
+      cmd: cat /home/ubuntu/.kube/config
+    register: k8s_config
+
+  - set_fact:
+      k8s_config: "{{ k8s_config.stdout }}"
+      cacheable: yes
+
+- name: "Applay Kubernetes config in worker-node"
+  hosts: worker_node
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  gather_facts: no
+
+#Создаём директорию под конфиг и передаём конфиг из переменной с мастер-ноды. Выставляем права
+  tasks:
+  - file:
+      dest: /home/ubuntu/.kube/
+      state: directory
+      owner: ubuntu
+      group: ubuntu
+
+  - shell:
+      cmd: echo "{{ hostvars['master_node']['k8s_config'] }}" > /home/ubuntu/.kube/config
+
+  - file:
+      dest: /home/ubuntu/.kube/config
+      owner: ubuntu
+      group: ubuntu
+      mode: "600"
+
+- name: "Setting up GitLab server in Docker, service SRV"
+  hosts: server
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  gather_facts: no
+  vars_files: gitlab-run-token.yml
+
+#apt update & upgrade. Создаём директорию под конфиг k8s, копируем его, выставляем права.
+#Добавляем репозитории Docker(docker-compose) и kubectl. Устанавливаем их
+#Запускаем докер образ gitlab/gitlab-runner, регистрируем и настраиваем runner в нём
+#Изменяем пути в кофиг файле gitlab-runner в соответсвии с проброшенными volume
+#Запускаем gitlab-runner на постоянной основе с необходимыми опциями 
+  tasks:
+  - apt:
+      upgrade: "yes"
+      update_cache: yes
+    retries: 10
+    delay: 10
+    register: result
+    until: result is succeeded
+
+  - file:
+      dest: /home/ubuntu/.kube/
+      state: directory
+      owner: ubuntu
+      group: ubuntu
+
+  - shell:
+      cmd: echo "{{ hostvars['master_node']['k8s_config'] }}" > /home/ubuntu/.kube/config
+
+  - file:
+      dest: /home/ubuntu/.kube/config
+      owner: ubuntu
+      group: ubuntu
+      mode: "600"
+
+  - get_url:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      dest: /usr/share/keyrings/docker-archive-keyring.asc
+
+  - apt_repository:
+      repo: deb [signed-by=/usr/share/keyrings/docker-archive-keyring.asc] https://download.docker.com/linux/ubuntu jammy stable
+      filename: docker
+
+  - shell: |
+      curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | tee /etc/apt/sources.list.d/kubernetes.list
+      curl -LO "https://dl.k8s.io/release/v1.27.4/bin/linux/amd64/kubectl"
+      install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+  - apt:
+      pkg:
+      - docker-ce
+      - docker-compose
+
+  - shell:
+      cmd: docker run -d --rm --name gitlab-runner -v /srv/gitlab-runner/config:/etc/gitlab-runner gitlab/gitlab-runner@sha256:06b32a1bf5adcb38536a76fec054bce1f37b373aeed87d47eacd961f605724ad register --non-interactive --url "https://gitlab.com/" --registration-token "{{ gitlab_run_token  }}" --executor "docker" --docker-image docker@sha256:adb52cf47859063409c1826d5c09b633d4d8e4f960f43e928b128caa7223c23e --description "srv-runner"
+
+
+  - pause:
+      seconds: 10
+
+  - replace:
+      path: /srv/gitlab-runner/config/config.toml
+      regexp: 'volumes = \["/cache"\]'
+      replace: 'volumes = ["/cache", "/srv/gitlab-runner/config:/etc/gitlab-runner", "/var/run/docker.sock:/var/run/docker.sock", "/home/ubuntu/.kube:/root/.kube"]'
+
+  - shell:
+      cmd: docker run -d --name gitlab-runner --restart always -v /srv/gitlab-runner/config:/etc/gitlab-runner -v /var/run/docker.sock:/var/run/docker.sock  gitlab/gitlab-runner@sha256:06b32a1bf5adcb38536a76fec054bce1f37b373aeed87d47eacd961f605724ad
+
+- name: "Setting up Monitoring in service SRV"
+  hosts: server
+  remote_user: ubuntu
+  become: yes
+  become_method: sudo
+  gather_facts: no
+
+#Создаём директории, выдаём права и копируем манифесты 
+  tasks:
+  - file:
+      path: "{{ item }}"
+      state: directory
+      owner: root
+      group: root
+    loop:
+      - '/opt/monitoring'
+      - '/opt/monitoring/fluentd'
+      - '/opt/monitoring/alertmanager'
+      - '/opt/monitoring/blackbox'
+      - '/opt/monitoring/prometheus'
+      - '/opt/monitoring/grafana'
+      - '/opt/monitoring/data'
+
+  - file:
+      dest: /opt/monitoring/alertmanager
+      state: directory
+      mode: "0777"
+
+  - file:
+      dest: /opt/monitoring/grafana
+      state: directory
+      mode: "0775"
+
+  - file:
+      dest: /opt/monitoring/data
+      state: directory
+      mode: "0777"
+
+  - copy:
+      src: "monitoring/docker-compose.yml"
+      dest: "/opt/monitoring/docker-compose.yml"
+
+  - copy:
+      src: "monitoring/alertmanager/config.yml"
+      dest: "/opt/monitoring/alertmanager/config.yml"
+
+  - copy:
+      src: "monitoring/blackbox/blackbox.yml"
+      dest: "/opt/monitoring/blackbox/blackbox.yml"
+
+  - copy:
+      src: "monitoring/prometheus/alert.rules"
+      dest: "/opt/monitoring/prometheus/alert.rules"
+
+  - copy:
+      src: "monitoring/prometheus/prometheus.yml"
+      dest: "/opt/monitoring/prometheus/prometheus.yml"
+
+  - copy:
+      src: "monitoring/fluentd/fluentd.yaml"
+      dest: "/opt/monitoring/fluentd/fluentd.yaml"
+      owner: ubuntu
+      group: ubuntu
+
+  - copy:
+      src: "stage-3-settings.sh"
+      dest: "/home/ubuntu/stage-3-settings.sh"
+      owner: ubuntu
+      group: ubuntu
+      mode: u+x,g+x,o+x
+
+  - shell:
+      cmd: sed -i -e 's/\r$//' /home/ubuntu/stage-3-settings.sh
